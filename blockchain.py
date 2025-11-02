@@ -5,6 +5,7 @@ from typing import List
 import sys
 from web3 import Web3
 import os
+from pymongo import MongoClient  # Added for broadcast flag check
 
 class Transaction:
     def __init__(self, sender, recipient, amount, signature):
@@ -22,7 +23,7 @@ class Transaction:
         }
 
 class Block:
-    def __init__(self, index, transactions: List[Transaction], previous_hash):
+    def __init__(self, index, transactions: List['Transaction'], previous_hash):
         self.index = index
         self.timestamp = time.time()
         self.transactions = transactions
@@ -49,10 +50,10 @@ class Blockchain:
     def get_latest_block(self):
         return self.chain[-1]
 
-    def verify_transaction(self, transaction: Transaction):
+    def verify_transaction(self, transaction: 'Transaction'):
         return transaction.signature == "valid_signature"
 
-    def add_transaction(self, transaction: Transaction):
+    def add_transaction(self, transaction: 'Transaction'):
         if not transaction.sender or not transaction.recipient or not transaction.amount:
             raise ValueError("Transaction must include sender, recipient, and amount")
         if not self.verify_transaction(transaction):
@@ -75,6 +76,9 @@ class Blockchain:
 # Ethereum Broadcast Logic
 def broadcast_to_ethereum(block_hash, tx_data):
     try:
+        some_data = json.loads(sys.stdin.read())
+        print(f"🐍 Python received data: {some_data}", file=sys.stderr)
+
         rpc_url = os.getenv("SEPOLIA_RPC_URL")  # Sepolia RPC (testnet)
         private_key = os.getenv("SEPOLIA_PRIVATE_KEY")
 
@@ -110,12 +114,27 @@ def broadcast_to_ethereum(block_hash, tx_data):
         signed_tx = acct.sign_transaction(tx)   # signing our transaction
         tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
 
-        print(f"Broadcasted to Ethereum: {web3.to_hex(tx_hash)}")
+        print(f"✅ Broadcasted to Ethereum: {web3.to_hex(tx_hash)}", file=sys.stderr)
         return {"status": "success", "tx_hash": web3.to_hex(tx_hash)}
 
     except Exception as e:
+        print(f"❌ Broadcast error: {e}", file=sys.stderr)
         return {"status": "error", "message": str(e)}
 
+
+# Check broadcast flag from MongoDB
+def get_broadcast_flag():
+    try:
+        mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+        client = MongoClient(mongo_uri)
+        db = client["mydb"]
+        config = db["config"].find_one({}, {"broadcast_enabled": 1, "_id": 0})
+        flag = bool(config.get("broadcast_enabled")) if config else False
+        print(f"📡 Broadcast flag from DB: {flag}", file=sys.stderr)
+        return flag
+    except Exception as e:
+        print(f"❌ Error checking broadcast flag: {e}", file=sys.stderr)
+        return False
 
 
 if __name__ == "__main__":
@@ -134,8 +153,13 @@ if __name__ == "__main__":
 
         block_hash = new_block.hash if new_block else blockchain.get_latest_block().hash
 
-        # Broadcast to Ethereum Testnet
-        eth_result = broadcast_to_ethereum(block_hash, tx_data)
+        # Check MongoDB flag before broadcasting
+        if get_broadcast_flag():
+            print("🟢 Broadcast enabled — sending to Ethereum...", file=sys.stderr)
+            eth_result = broadcast_to_ethereum(block_hash, tx_data)
+        else:
+            print("🟠 Broadcast disabled — skipping Ethereum broadcast.", file=sys.stderr)
+            eth_result = {"status": "skipped", "tx_hash": None}
 
         output = {
             "valid": True,
@@ -148,4 +172,5 @@ if __name__ == "__main__":
         print(json.dumps(output))
 
     except Exception as e:
+        print(f"🔥 Fatal error: {e}", file=sys.stderr)
         print(json.dumps({"valid": False, "error": str(e)}))
